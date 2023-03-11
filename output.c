@@ -112,4 +112,21 @@ static void append_log_node(struct log_pool *pool, struct log_node *node)
     {
         pool->tail->next = node;
     }
-    pool->tail =
+    pool->size++;
+    pool->tail = node;
+}
+
+/**
+ * 初始化日志信息
+ */
+static void init_log_info()
+{
+    init_log_pool(&log_info.pool);
+    log_info.log_file = fopen(log_info.log_dir, "a+");
+    if (log_info.log_file == NULL)
+    {
+        printf("Failed to open log file: %s \n", log_info.log_dir);
+        exit(1);
+    }
+    log_info.initialized = true;
+}
