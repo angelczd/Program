@@ -16,9 +16,7 @@
 // 2. boot_time: The boot time
 // Return: 0 on success, -1 on failure
 
-
-
-//hello world
+// hello world
 int main()
 {
     printf("hello world");
