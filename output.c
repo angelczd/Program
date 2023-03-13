@@ -112,9 +112,11 @@ static void append_log_node(struct log_pool *pool, struct log_node *node)
     {
         pool->tail->next = node;
     }
-    pool->size++;
     pool->tail = node;
+    node->next = NULL;
+    pool->size++;
 }
+
 
 /**
  * 初始化日志信息
