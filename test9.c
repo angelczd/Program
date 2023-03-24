@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <stdbool.h>
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
@@ -31,30 +33,30 @@ typedef struct module_info
 
 typedef struct log_buffer
 {
-    log_entry_t *entries;   //日志内容数组
-    int capacity;           //日志缓冲区容量
-    int count;              //当前存储日志数量(未保存文件的)
-    int read_index;         //读取日志的索引
-    int write_index;        //写入日志的索引
+    log_entry_t *entries; // 日志内容数组
+    int capacity;         // 日志缓冲区容量
+    int count;            // 当前存储日志数量(未保存文件的)
+    int read_index;       // 读取日志的索引
+    int write_index;      // 写入日志的索引
 } log_buffer_t;
 
-//日志缓冲区
+// 日志缓冲区
 static log_buffer_t g_log_buffer = {.entries = NULL, .capacity = 0, .count = 0, .read_index = 0, .write_index = 0};
 
-//模块链表头尾指针
+// 模块链表头尾指针
 static module_info_t *g_module_list_head = NULL;
 static module_info_t *g_module_list_tail = NULL;
 
-//日志文件路径
+// 日志文件路径
 static char g_log_file_path[MAX_LOG_FILE_PATH_LEN];
-//日志刷新阈值
+// 日志刷新阈值
 static int g_log_flush_threshold = DEFAULT_LOG_FLUSH_THRESHOLD;
 
-//日志写入线程
+// 日志写入线程
 static pthread_t g_writer_thread;
-//log_buffer写入互斥锁
+static bool g_writer_thread_running = false;
+// log_buffer写入互斥锁
 static pthread_mutex_t g_log_buf_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 
 int get_seconds_from_first_log(const char *module_name)
 {
@@ -131,8 +133,8 @@ module_info_t *find_or_add_module_info(const char *module_name, const char *depe
 
 int init_log_buffer(int capacity, const char *log_path, int flush_threshold)
 {
-    //init log file path
-    if(NULL != log_path)
+    // init log file path
+    if (NULL != log_path)
     {
         snprintf(g_log_file_path, MAX_LOG_FILE_PATH_LEN, "%s", log_path);
     }
@@ -140,11 +142,11 @@ int init_log_buffer(int capacity, const char *log_path, int flush_threshold)
     {
         snprintf(g_log_file_path, MAX_LOG_FILE_PATH_LEN, "%s", DEFAULT_LOG_FILE_PATH);
     }
-    //init log flush threshold
+    // init log flush threshold
     g_log_flush_threshold = flush_threshold <= 0 ? DEFAULT_LOG_FLUSH_THRESHOLD : flush_threshold;
 
-    //init log buffer
-    g_log_buffer.entries = (log_entry_t*)malloc(capacity * sizeof(log_entry_t));
+    // init log buffer
+    g_log_buffer.entries = (log_entry_t *)malloc(capacity * sizeof(log_entry_t));
     if (g_log_buffer.entries == NULL)
     {
         fprintf(stderr, "Failed to allocate memory for log buffer.\n");
@@ -162,7 +164,6 @@ int init_log_buffer(int capacity, const char *log_path, int flush_threshold)
 void print_to_log_buffer(const char *module_name, const char *dependencies, const char *log_content)
 {
     time_t current_time = time(NULL);
-    current_time = localtime(&current_time);
 
     // calculate seconds from first log
     int seconds = 0;
@@ -187,11 +188,11 @@ void print_to_log_buffer(const char *module_name, const char *dependencies, cons
         m->last_log_time = current_time;
     }
 
-    if(g_log_buffer.count < g_log_buffer.capacity)
+    if (g_log_buffer.count < g_log_buffer.capacity)
     {
-        g_log_buffer.entries[g_log_buffer.write_index]->seconds_from_first_log = seconds;
-        strftime(g_log_buffer.entries[g_log_buffer.write_index]->timestr, 20, "%Y-%m-%d %H:%M:%S", current_time);
-        strncpy(g_log_buffer.entries[g_log_buffer.write_index]->log_content, log_content, MAX_LOG_ENTRY_LEN);
+        g_log_buffer.entries[g_log_buffer.write_index].seconds_from_first_log = seconds;
+        strftime(g_log_buffer.entries[g_log_buffer.write_index].timestr, 20, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
+        strncpy(g_log_buffer.entries[g_log_buffer.write_index].log_content, log_content, MAX_LOG_ENTRY_LEN);
 
         g_log_buffer.write_index = (g_log_buffer.write_index + 1) % g_log_buffer.capacity;
         if (g_log_buffer.count < g_log_buffer.capacity)
@@ -212,14 +213,72 @@ void print_to_log_buffer(const char *module_name, const char *dependencies, cons
     return;
 }
 
-void *writer_thread_func(void *arg)
+// 将writer_thread_func中写文件的部分抽出来，方便单元测试
+int write_log_content_to_file(FILE *file)
 {
-    FILE *log_file = NULL; 
-
     int count = 0;
     int index = 0;
+    if (file == NULL)
+    {
+        return -1;
+    }
 
-    log_file =  fopen(g_log_file_path, "a");
+    // 仅对count和read_index加锁互斥写入
+    pthread_mutex_lock(&g_log_buf_mutex);
+    count = g_log_buffer.count;
+    index = g_log_buffer.read_index;
+    pthread_mutex_unlock(&g_log_buf_mutex);
+
+    for (int i = 0; i < count; i++)
+    {
+        fprintf(file, "[%s][%s][%d]%s\n",
+                g_log_buffer.entries[index].timestr,
+                g_log_buffer.entries[index].module_name,
+                g_log_buffer.entries[index].seconds_from_first_log,
+                g_log_buffer.entries[index].log_content);
+
+        index = (index + 1) % g_log_buffer.capacity;
+    }
+    fflush(file);
+
+    pthread_mutex_lock(&g_log_buf_mutex);
+    g_log_buffer.count -= count;
+    g_log_buffer.read_index = index;
+    pthread_mutex_unlock(&g_log_buf_mutex);
+
+    return 0;
+}
+
+
+int ouput_log_module_list(FILE *log_file)
+{
+    module_info_t *p = NULL;
+    if (log_file == NULL)
+    {
+        return -1;
+    }
+    fprintf(log_file, "[%s][%s][%s][%s]%s\n", "module", "first_log_time", "last_log_time", "diff", "dependencies");
+    p = g_module_list_head;
+    while (p != NULL)
+    {
+        double diff = difftime(p->last_log_time, p->first_log_time);
+        fprintf(log_file, "[%s][%s][%s][%.2lf]%s\n",
+                p->module_name,
+                asctime(localtime(&p->first_log_time)),
+                asctime(localtime(&p->last_log_time)),
+                diff,
+                p->dependencies);
+        p = p->next;
+    }
+
+    return 0;
+}
+
+void *writer_thread_func(void *arg)
+{
+    FILE *log_file = NULL;
+
+    log_file = fopen(g_log_file_path, "a");
     if (log_file == NULL)
     {
         fprintf(stderr, "Failed to open log file: %s\n", g_log_file_path);
@@ -232,33 +291,28 @@ void *writer_thread_func(void *arg)
 
         if (g_log_buffer.count >= g_log_flush_threshold)
         {
-            pthread_mutex_lock(&g_log_buf_mutex);
-            count = g_log_buffer.count;
-            index = g_log_buffer.read_index;
-            pthread_mutex_unlock(&g_log_buf_mutex);
+            write_log_content_to_file(log_file);
+        }
 
-            for (int i = 0; i < count; i++)
-            {
-                fprintf(log_file, "[%s][%s][%d]%s\n",
-                        g_log_buffer.entries[index]->timestr,
-                        g_log_buffer.entries[index]->module_name,
-                        g_log_buffer.entries[index]->seconds_from_first_log,
-                        g_log_buffer.entries[index]->log_content);
-
-                index = (index + 1) % g_log_buffer.capacity;
-            }
-            fflush(log_file);
-            
-            pthread_mutex_lock(&g_log_buf_mutex);
-            g_log_buffer.count -= count;
-            g_log_buffer.read_index = index;
-            pthread_mutex_unlock(&g_log_buf_mutex);
+        if (!g_writer_thread_running)
+        {
+            write_log_content_to_file(log_file);
+            break;
         }
     }
+
+    ouput_log_module_list(log_file);
 
     fclose(log_file);
 
     return NULL;
+}
+
+// stop thread
+void stop_log_writer_thread()
+{
+    g_writer_thread_running = false;
+    pthread_join(g_writer_thread, NULL);
 }
 
 int start_log_writer_thread()
@@ -266,45 +320,15 @@ int start_log_writer_thread()
     return pthread_create(&g_writer_thread, NULL, writer_thread_func, NULL);
 }
 
-void log_module_list()
+void release_log_resources()
 {
-    module_info_t *p = NULL;
-    FILE *log_file = fopen(g_log_file_path, "a");
-    if (log_file == NULL)
-    {
-        fprintf(stderr, "Failed to open log file: %s\n", g_log_file_path);
-        return;
-    }
-    fprintf(log_file,"[%s][%s][%s][%.2lf]%s\n", "module", "first_log_time", "last_log_time", "diff", "dependencies");
-    p = g_module_list_head;
-    while (p != NULL)
-    {
-        double diff = difftime(p->last_log_time, p->first_log_time);
-        fprintf(log_file, "[%s][%s][%s][%.2lf]%s\n",
-                p->module_name,
-                asctime(p->first_log_time),
-                asctime(p->last_log_time),
-                diff,
-                p->dependencies);
-        p = p->next;
-    }
-    fclose(log_file);
-}
-
-void release_resources()
-{
-    pthread_cancel(g_writer_thread);
-    pthread_join(g_writer_thread, NULL);
+    stop_log_writer_thread();
     pthread_mutex_destroy(&g_log_buf_mutex);
 
-    for (int i = 0; i < g_log_buffer.capacity; i++)
+    if (g_log_buffer.entries != NULL)
     {
-        if (g_log_buffer.entries[i] != NULL)
-        {
-            free(g_log_buffer.entries[i]);
-        }
+        free(g_log_buffer.entries);
     }
-    free(g_log_buffer.entries);
     module_info_t *p = g_module_list_head;
     while (p != NULL)
     {
@@ -316,7 +340,7 @@ void release_resources()
 
 int main()
 {
-    if (init_log_buffer(DEFAULT_LOG_ENTRIES_CAPACITY, DEFAULT_LOG_FILE_PATH, DEFAULT_LOG_ENTRIES_FLUSH_THRESHOLD) != 0)
+    if (init_log_buffer(DEFAULT_LOG_ENTRIES_CAPACITY, DEFAULT_LOG_FILE_PATH, DEFAULT_LOG_FLUSH_THRESHOLD) != 0)
     {
         fprintf(stderr, "Failed to initialize log buffer.\n");
         exit(EXIT_FAILURE);
@@ -327,14 +351,13 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    print_to_log_buffer("Module A", "", "This is a log entry of Module A.");
-    print_to_log_buffer("Module B", "", "This is a log entry of Module B.");
-    print_to_log_buffer("Module A", "", "Another log entry of Module A.");
-    print_to_log_buffer("Module C", "", "This is a log entry of Module C.");
+    print_to_log_buffer("Module A", "Moduleaaa", "This is a log entry of Module A.");
+    print_to_log_buffer("Module B", "1231a", "This is a log entry of Module B.");
+    print_to_log_buffer("Module A", "asda", "Another log entry of Module A.");
+    print_to_log_buffer("Module C", "dddd", "This is a log entry of Module C.");
     print_to_log_buffer("Module A", "Module B,Module D", "The last log entry of Module A.");
 
-    log_module_list();
+    release_log_resources();
 
-    release_resources();
     return 0;
 }
