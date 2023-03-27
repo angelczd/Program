@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <time.h>
+#include <sys/time.h>
+#include <math.h>
 
 #define LOG_BUFFER_SIZE 512           // 打印信息缓冲池大小
 #define MAX_MODULE_NAME_LEN 32        // 模块名最大长度
@@ -32,6 +34,36 @@ static unsigned int log_msg_count = 0;             // 打印信息数量计数�
 static unsigned int log_buffer_size = LOG_BUFFER_SIZE;   // 打印信息缓存池大小
 static char *boot_log_path = BOOT_LOG_PATH;              // 日志文件路径
 static unsigned int log_flush_threshold = LOG_FLUSH_THRESHOLD;  // 缓冲区日志数目达到该值后触发自动写入
+
+// 刷新并写入所有日志
+void flush_boot_log() {
+    if (log_msg_count == 0) {
+        return;
+    }
+
+    // 打开或创建日志文件
+    FILE *fp = fopen(boot_log_path, "a");
+    if (fp == NULL) {
+        return;
+    }
+
+    // 遍历所有打印信息，按照规定格式写入日志文件，并释放相关内存空间
+    struct log_message *tmp_msg = log_msg_buffer;
+    while (tmp_msg != NULL) {
+        fwrite(tmp_msg->message, strlen(tmp_msg->message), 1, fp);
+        fputc('\n', fp);
+        struct log_message *next = tmp_msg->next;
+        free(tmp_msg->message);
+        free(tmp_msg);
+        tmp_msg = next;
+    }
+
+    // 重置缓冲池数据
+    log_msg_buffer = NULL;
+    log_msg_count = 0;
+
+    fclose(fp);
+}
 
 // 打印信息记录接口，将所有打印先记录到缓存中
 void module_boot_log(const char *module_name, const char *dependency, const char *format, ...) {
@@ -106,36 +138,6 @@ void init_boot_log(unsigned int buffer_size, const char *path, unsigned int flus
     log_buffer_size = buffer_size > 0 ? buffer_size : LOG_BUFFER_SIZE;
     boot_log_path = path != NULL ? path : BOOT_LOG_PATH;
     log_flush_threshold = flush_threshold > 0 ? flush_threshold : LOG_FLUSH_THRESHOLD;
-}
-
-// 刷新并写入所有日志
-void flush_boot_log() {
-    if (log_msg_count == 0) {
-        return;
-    }
-
-    // 打开或创建日志文件
-    FILE *fp = fopen(boot_log_path, "a");
-    if (fp == NULL) {
-        return;
-    }
-
-    // 遍历所有打印信息，按照规定格式写入日志文件，并释放相关内存空间
-    struct log_message *tmp_msg = log_msg_buffer;
-    while (tmp_msg != NULL) {
-        fwrite(tmp_msg->message, strlen(tmp_msg->message), 1, fp);
-        fputc('\n', fp);
-        struct log_message *next = tmp_msg->next;
-        free(tmp_msg->message);
-        free(tmp_msg);
-        tmp_msg = next;
-    }
-
-    // 重置缓冲池数据
-    log_msg_buffer = NULL;
-    log_msg_count = 0;
-
-    fclose(fp);
 }
 
 // 将模块状态信息写入日志文件
