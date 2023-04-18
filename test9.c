@@ -105,7 +105,7 @@ module_info_t *find_or_add_module_info(const char *module_name, const char *depe
     {
         if (strcmp(p->module_name, module_name) == 0)
         {
-            if (strlen(dependencies) > 0)
+            if (dependencies != NULL && strlen(dependencies) > 0)
             {
                 // 先判断当前字符串是不是空的，如果为空则不需要输入逗号
                 if (strlen(p->dependencies) > 0)
@@ -163,6 +163,13 @@ int init_log_buffer(int capacity, const char *log_path, int flush_threshold)
 
 void print_to_log_buffer(const char *module_name, const char *dependencies, const char *log_content)
 {
+    // check param
+    if(module_name == NULL || log_content == NULL)
+    {
+        return;
+    }
+    
+    // get current time
     time_t current_time = time(NULL);
 
     // calculate seconds from first log
@@ -192,6 +199,7 @@ void print_to_log_buffer(const char *module_name, const char *dependencies, cons
     {
         g_log_buffer.entries[g_log_buffer.write_index].seconds_from_first_log = seconds;
         strftime(g_log_buffer.entries[g_log_buffer.write_index].timestr, 20, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
+
         strncpy(g_log_buffer.entries[g_log_buffer.write_index].log_content, log_content, MAX_LOG_ENTRY_LEN);
 
         g_log_buffer.write_index = (g_log_buffer.write_index + 1) % g_log_buffer.capacity;
